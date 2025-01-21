@@ -1,11 +1,11 @@
 #version 330 core
 
-in vec4 v_color;
-out vec4 o_color;
-
-const float brightness = 0.25;
+in vec3 color;
+out vec4 fragment;
 
 void main() {
-	o_color = vec4(brightness * abs(normalize(v_color.rgb - 0.5)), 1.0);
+    vec3 u = normalize(color + 0.5);
+    float brightness = 1.0 * smoothstep(-1.0, -0.25, dot(u, vec3(0.0, 1.0, 0.0)));
+	fragment = vec4(brightness * abs(u), 1.0);
 }
 

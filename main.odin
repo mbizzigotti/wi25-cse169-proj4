@@ -1,7 +1,8 @@
 package proj4
 import "base:runtime"
 import "core:fmt"
-import time "core:time"
+import "core:mem"
+import "core:time"
 import glfw "vendor:GLFW"
 import gl   "vendor:OpenGL"
 import glm  "core:math/linalg/glsl"
@@ -13,6 +14,16 @@ TITLE  :: "CSE 169 Cloth Simulation"
 
 window    : glfw.WindowHandle
 last_tick : time.Tick
+current_time: f32 = 0
+enable_sim : bool = true
+
+env: struct {
+    sky_shader:   Shader,
+    cloth_shader: Shader,
+    floor_shader: Shader,
+    cloth:        Cloth,
+    sphere:       Mesh,
+}
 
 main :: proc() {
     if !bool(glfw.Init()) {
@@ -36,122 +47,88 @@ main :: proc() {
 
     glfw.SetCursorPosCallback(window, on_cursor)
     glfw.SetMouseButtonCallback(window, on_mouse)
+    glfw.SetKeyCallback(window, on_key)
 
     glfw.MakeContextCurrent(window)
     gl.load_up_to(3, 3, glfw.gl_set_proc_address)
     gl.ClearColor(0.0, 0.0, 0.0, 1.0)
     gl.Enable(gl.DEPTH_TEST)
-    create()
+
+    { // Initialization
+        using env
+    
+        sky_shader = load_shader (
+            "shaders/skybox.vert",
+            "shaders/skybox_like.frag"
+        )
+        cloth_shader = load_shader (
+            "shaders/cloth.vert",
+            "shaders/cloth.frag"
+        )
+        floor_shader = load_shader (
+            "shaders/floor.vert",
+            "shaders/floor.frag"
+        )
+        sphere = create_sphere(Vertex, {1,1,0.4})
+        cloth = create_cloth(40, 30)
+    
+        reset_cloth(&cloth)
+    }
 
     last_tick = time.tick_now()
     for !glfw.WindowShouldClose(window) {
         glfw.PollEvents()
         gl.Clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT)
         duration := time.tick_lap_time(&last_tick)
-        dt := cast(f32) time.duration_seconds(duration)
+        dt := min(cast(f32) time.duration_seconds(duration), 1.0/60.0)
         draw_frame(dt)
+        if enable_sim { current_time += dt }
         glfw.SwapBuffers(window)
+        free_all(context.temp_allocator)
     }
 }
-
-Vertex :: struct {
-    position : [3] f32,
-    color    : [3] f32,
-}
-vertex_buffer : Vertex_Buffer
-vertex_array  : Vertex_Array
-shader        : Shader
-sky_shader    : Shader
-mesh          : Mesh
-
-create :: proc() {
-    shader = load_shader (
-        "shaders/solid_color.vert",
-        "shaders/solid_color.frag"
-    )
-    sky_shader = load_shader (
-        "shaders/solid_color.vert",
-        "shaders/skybox_like.frag"
-    )
-
-    vertices : [] Vertex : {
-        {{0,0,10}, {1,1,1}},
-        {{0,1,10}, {0,0,1}},
-        {{1,0,10}, {1,1,1}},
-    }
-
-    vertex_buffer = load_vertex_buffer(vertices)
-
-    {
-        vertices: [] Vertex : {
-            // Front face
-            {{-0.5, -0.5,  0.5}, {0,0,1}}, // 0 Bottom-left
-            {{ 0.5, -0.5,  0.5}, {1,0,1}}, // 1 Bottom-right
-            {{ 0.5,  0.5,  0.5}, {1,1,1}}, // 2 Top-right
-            {{-0.5,  0.5,  0.5}, {0,1,1}}, // 3 Top-left
-
-            // Back face
-            {{-0.5, -0.5, -0.5}, {0,0,0}}, // 4 Bottom-left
-            {{ 0.5, -0.5, -0.5}, {1,0,0}}, // 5 Bottom-right
-            {{ 0.5,  0.5, -0.5}, {1,1,0}}, // 6 Top-right
-            {{-0.5,  0.5, -0.5}, {0,1,0}}, // 7 Top-left
-        }
-
-        indices: [] u32 : {
-            // Front face
-            0, 1, 2,
-            2, 3, 0,
-
-            // Back face
-            4, 5, 6,
-            6, 7, 4,
-
-            // Left face
-            4, 0, 3,
-            3, 7, 4,
-
-            // Right face
-            1, 5, 6,
-            6, 2, 1,
-
-            // Top face
-            3, 2, 6,
-            6, 7, 3,
-
-            // Bottom face
-            4, 5, 1,
-            1, 0, 4,
-        }
-
-        mesh = create_mesh(vertices, indices)
-    }
-
-    vertex_array = create_vertex_array(Vertex)
-}
-
-t : f32 = 0
 
 draw_frame :: proc(dt: f32) {
-    mvp : glm.mat4
-    bind(shader)
-    bind(vertex_array)
+    using env
 
-    gl.DepthMask(gl.FALSE)
-    bind(vertex_buffer)
-    mvp = math.identity(glm.mat4)
-    gl.UniformMatrix4fv(gl.GetUniformLocation(shader.id, "u_transform"), 1, gl.FALSE, auto_cast &mvp)
-    gl.DrawArrays(gl.TRIANGLES, 0, 3)
+    view, proj := view_projection(camera)
+    model := math.identity(glm.mat4)
+    view_proj := proj * glm.inverse(view)
+    pos: glm.vec4 = view[3]
 
-    gl.DepthMask(gl.TRUE)
-    mvp = view_projection(camera) //* math.matrix4_from_euler_angle_y(t)
-    gl.UniformMatrix4fv(gl.GetUniformLocation(shader.id, "u_transform"), 1, gl.FALSE, auto_cast &mvp)
-    draw(mesh)
-
+    if enable_sim {
+        num_steps :: 16
+        for k in 0..<num_steps {
+            simulation_step(&cloth, dt / cast(f32) num_steps)
+        }
+    }
+    
+    gl.CullFace(gl.FRONT)
+    gl.Disable(gl.CULL_FACE)
+    gl.Disable(gl.BLEND)
+    
+    bind(cloth_shader)
+    gl.Uniform3fv(gl.GetUniformLocation(cloth_shader.id, "u_ViewPos"), 1, auto_cast &pos)
+    gl.UniformMatrix4fv(gl.GetUniformLocation(cloth_shader.id, "u_ViewProj"), 1, gl.FALSE, auto_cast &view_proj)
+    gl.UniformMatrix4fv(gl.GetUniformLocation(cloth_shader.id, "u_Model"),    1, gl.FALSE, auto_cast &model)
+    simulation_draw(&cloth)
+    
+    model = math.matrix4_scale_f32(0.48)
+    gl.UniformMatrix4fv(gl.GetUniformLocation(cloth_shader.id, "u_Model"), 1, gl.FALSE, auto_cast &model)
+    draw(sphere)
+    
+    gl.Enable(gl.CULL_FACE)
     bind(sky_shader)
-    mvp = view_projection(camera) * math.matrix4_scale_f32(20) //* math.matrix4_from_euler_angle_y(t)
-    gl.UniformMatrix4fv(gl.GetUniformLocation(shader.id, "u_transform"), 1, gl.FALSE, auto_cast &mvp)
-    draw(mesh)
-    t += dt
+    gl.UniformMatrix4fv(gl.GetUniformLocation(sky_shader.id, "u_ViewProj"), 1, gl.FALSE, auto_cast &view_proj)
+    gl.DrawArrays(gl.TRIANGLES, 0, 36)
+    
+    gl.CullFace(gl.BACK)
+    gl.Enable(gl.BLEND)
+    gl.BlendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);  
+    bind(floor_shader)
+    gl.Uniform3fv(gl.GetUniformLocation(floor_shader.id, "u_ViewPos"), 1, auto_cast &pos)
+    gl.UniformMatrix4fv(gl.GetUniformLocation(floor_shader.id, "u_ViewProj"), 1, gl.FALSE, auto_cast &view_proj)
+    gl.DrawArrays(gl.TRIANGLES, 0, 6)
 }
 
 LeftDown, RightDown: bool
@@ -176,7 +153,6 @@ on_cursor :: proc "cdecl" (window: glfw.WindowHandle, currX, currY: f64) {
     MouseY = cast(int) currY
 
     // Move camera
-    // NOTE: this should really be part of Camera::Update()
     if (LeftDown) {
         rate :: 1.0
         camera.azimuth = camera.azimuth + dx * rate;
@@ -185,6 +161,29 @@ on_cursor :: proc "cdecl" (window: glfw.WindowHandle, currX, currY: f64) {
     if (RightDown) {
         rate :: 0.005
         camera.distance = clamp(camera.distance * (1.0 - dx * rate), 0.01, 1000.0);
+    }
+}
+on_key :: proc "cdecl" (window: glfw.WindowHandle, key, scancode, action, mods: i32) {
+    if action != glfw.PRESS { return } // Check for a key press.
+
+    switch key {
+        case glfw.KEY_ESCAPE:
+            glfw.SetWindowShouldClose(window, glfw.TRUE)
+        break;
+
+        case glfw.KEY_R:
+            current_time = 0
+            context = runtime.default_context()
+            reset_cloth(&env.cloth)
+        break;
+
+        case glfw.KEY_SPACE:
+            enable_sim = !enable_sim
+        break;
+
+        case glfw.KEY_D:
+            env.cloth.drop = true
+        break;
     }
 }
 
