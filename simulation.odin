@@ -9,13 +9,19 @@ Particle :: struct {
     pos:    [3] f32,
     vel:    [3] f32,
     force:  [3] f32,
-    mass:       f32,
+    fixed:  bool,
 }
 
 Spring_Damper :: struct {
     p0, p1: u32, // particles
     ks, kd: f32, // spring constant and damping factor
     l:      f32, // rest length
+}
+
+Fixed_State :: enum {
+    FIX_NONE,
+    FIX_TOP,
+    FIX_TOP_CORNERS,
 }
 
 Cloth :: struct {
@@ -29,8 +35,10 @@ Cloth :: struct {
     normals:             [] [3] f32,
     air_velocity:        [3] f32,
     air_constant:        f32, // p * cd
+    mass:                f32, // mass of each particle
     sim_time:            f32,
-    drop:                bool,
+    fixed_velocity:      [2] f32, // how to move the fixed particles (user interaction)
+    fixed_state:         Fixed_State,
 
     // Draw Data
     mesh:                Mesh,
@@ -116,11 +124,29 @@ cloth_default_z :: proc(t: f32) -> f32 {
     //return m.cos(t) + m.cos(3 * t) * 0.5
 }
 
+set_fixed :: proc(using cloth: ^Cloth, state: Fixed_State) {
+    for &p in particles {
+        p.fixed = false;
+    }
+    #partial switch state {
+    case .FIX_TOP:
+        for &p in particles[:dim.x] {
+            p.fixed = true;
+        }
+    break;
+    case .FIX_TOP_CORNERS:
+        particles[0]      .fixed = true;
+        particles[dim.x-1].fixed = true;
+    break;
+    }
+    cloth.fixed_state = state; 
+}
+
 reset_cloth :: proc(using cloth: ^Cloth) {
     sim_time = 0
-    drop = false
     air_velocity = {0,0,10}
     air_constant = -10.0
+    mass = 1.0;
 
     // reset particle data
     size  := [2] f32 { 5.0, 2.0 }
@@ -136,9 +162,9 @@ reset_cloth :: proc(using cloth: ^Cloth) {
                 posz,
             }
             particles[i].vel = {}
-            particles[i].mass = 1.0
         }
     }
+    set_fixed(cloth, .FIX_TOP);
 
     // reset spring data
     for &s in springs {
@@ -165,7 +191,7 @@ simulation_draw :: proc(using cloth: ^Cloth) {
 simulation_step :: proc(using cloth: ^Cloth, dt: f32) {
     // Reset all forces and normals
     gravity :: [3] f32 { 0, -9.8, 0 }
-    for &p in particles { p.force = gravity * p.mass }
+    for &p in particles { p.force = gravity * mass }
     for &n in normals { n = {} }
     // Calculate normals & Apply forces from aerodynamics
     for y in 0..<dim.y - 1 {
@@ -228,11 +254,13 @@ simulation_step :: proc(using cloth: ^Cloth, dt: f32) {
     }
     // Integrate
     for &p, i in particles {
-        if !drop && (i < cast(int) dim.x) {
-        //if !drop && (i == 0 || i == cast(int) dim.x - 1 || i == cast(int) dim.x / 2) {
-            continue
-        }
         using p
+        
+        if p.fixed {
+            pos += {fixed_velocity.x, 0, fixed_velocity.y} * dt;
+            continue;
+        }
+
         acc := force / mass
         vel += acc * dt
         pos = pos + vel * dt
@@ -256,16 +284,6 @@ simulation_step :: proc(using cloth: ^Cloth, dt: f32) {
             vel.x= (1-friction) * vel.x; // cheezy
             vel.z= (1-friction) * vel.z; // cheezy
         }
-    }
-    // fun
-    if !drop {
-        z := cloth_default_z(sim_time)
-        for &p in particles[:dim.x] {
-            p.pos.z = z
-        }
-        //particles[0]      .pos.z = z
-        //particles[dim.x/2].pos.z = z
-        //particles[dim.x-1].pos.z = z
     }
 
     sim_time += dt

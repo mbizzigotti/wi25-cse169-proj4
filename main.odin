@@ -3,10 +3,12 @@ import "base:runtime"
 import "core:fmt"
 import "core:mem"
 import "core:time"
+import "core:strings"
 import glfw "vendor:GLFW"
 import gl   "vendor:OpenGL"
 import glm  "core:math/linalg/glsl"
 import math "core:math/linalg"
+import "vendor:stb/easy_font"
 
 WIDTH  :: 800
 HEIGHT :: 600
@@ -24,6 +26,14 @@ env: struct {
     cloth:        Cloth,
     sphere:       Mesh,
 }
+
+font : struct {
+    vertices:      [] u8,
+    vertex_buffer: Vertex_Buffer,
+    index_buffer:  Index_Buffer,
+    shader:        Shader,
+    y:             f32,
+};
 
 main :: proc() {
     if !bool(glfw.Init()) {
@@ -52,7 +62,7 @@ main :: proc() {
     glfw.MakeContextCurrent(window)
     gl.load_up_to(3, 3, glfw.gl_set_proc_address)
     gl.ClearColor(0.0, 0.0, 0.0, 1.0)
-    gl.Enable(gl.DEPTH_TEST)
+    glfw.SwapInterval(1);
 
     { // Initialization
         using env
@@ -73,6 +83,28 @@ main :: proc() {
         cloth = create_cloth(40, 30)
     
         reset_cloth(&cloth)
+
+        font_vs :: `
+        #version 330 core
+        in vec3 v_position;
+        in vec4 v_color;
+        const float scale = 0.005;
+        const vec3 flip = vec3(6.0/8.0,-1,1);
+        void main() {
+            gl_Position = vec4(scale * v_position * flip - vec3(0.9), 1.0);
+        }
+        `
+        font_fs :: `
+        #version 330 core
+        out vec4 fragment;
+        void main() {
+            fragment = vec4(1.0);
+        }
+        `
+        font.shader.id, _ = gl.load_shaders_source(font_vs, font_fs);
+        font.vertices = make([] u8, 999999);
+        font.vertex_buffer = load_vertex_buffer([] easy_font.Vertex {})
+        font.index_buffer = load_quads_index_buffer(10000);
     }
 
     last_tick = time.tick_now()
@@ -88,6 +120,10 @@ main :: proc() {
     }
 }
 
+key_down :: proc(key: i32) -> bool {
+    return glfw.GetKey(window, key) != glfw.RELEASE;
+}
+
 draw_frame :: proc(dt: f32) {
     using env
 
@@ -95,6 +131,26 @@ draw_frame :: proc(dt: f32) {
     model := math.identity(glm.mat4)
     view_proj := proj * glm.inverse(view)
     pos: glm.vec4 = view[3]
+    
+    {
+        using cloth;
+        target_velocity : [2] f32;
+        if key_down(glfw.KEY_COMMA) {
+            air_velocity = math.matrix3_from_euler_angle_y(dt) * air_velocity;
+        }
+        if key_down(glfw.KEY_PERIOD) {
+            air_velocity = math.matrix3_from_euler_angle_y(-dt) * air_velocity;
+        }
+        if key_down(glfw.KEY_LEFT)  { target_velocity.x += 5.0; }
+        if key_down(glfw.KEY_RIGHT) { target_velocity.x -= 5.0; }
+        if key_down(glfw.KEY_UP)    { target_velocity.y += 5.0; }
+        if key_down(glfw.KEY_DOWN)  { target_velocity.y -= 5.0; }
+
+        fixed_velocity += (target_velocity - fixed_velocity) * 2.0 * dt;
+
+        if key_down(glfw.KEY_LEFT_BRACKET)  { air_velocity -= math.normalize(air_velocity) * 10.0 * dt; }
+        if key_down(glfw.KEY_RIGHT_BRACKET) { air_velocity += math.normalize(air_velocity) * 10.0 * dt; }
+    }
 
     if enable_sim {
         num_steps :: 16
@@ -106,6 +162,7 @@ draw_frame :: proc(dt: f32) {
     gl.CullFace(gl.FRONT)
     gl.Disable(gl.CULL_FACE)
     gl.Disable(gl.BLEND)
+    gl.Enable(gl.DEPTH_TEST)
     
     bind(cloth_shader)
     gl.Uniform3fv(gl.GetUniformLocation(cloth_shader.id, "u_ViewPos"), 1, auto_cast &pos)
@@ -129,6 +186,32 @@ draw_frame :: proc(dt: f32) {
     gl.Uniform3fv(gl.GetUniformLocation(floor_shader.id, "u_ViewPos"), 1, auto_cast &pos)
     gl.UniformMatrix4fv(gl.GetUniformLocation(floor_shader.id, "u_ViewProj"), 1, gl.FALSE, auto_cast &view_proj)
     gl.DrawArrays(gl.TRIANGLES, 0, 6)
+    
+    gl.Disable(gl.DEPTH_TEST)
+    gl.Disable(gl.CULL_FACE)
+
+    buffer : [256] u8;
+    
+    bind(font.shader);
+    bind(font.index_buffer);
+    bind(font.vertex_buffer);
+
+    print_string(fmt.bprintf(buffer[:], "FPS: {}", 1.0 / dt))
+    print_string(fmt.bprintf(buffer[:], "air velocity: {}", cloth.air_velocity))
+    state, _ := fmt.enum_value_to_string(cloth.fixed_state);
+    print_string(state)
+    
+    font.y = 0;
+}
+
+print_string :: proc(text: string, color: [4] u8 = {255, 255, 255, 255}) {
+    using font;
+    count := easy_font.print_vertex_buffer(0, y, text, color, vertices);
+    upload(font.vertex_buffer, font.vertices);
+    
+    gl.DrawElements(gl.TRIANGLES, cast(i32) count * 6, gl.UNSIGNED_INT, nil);
+
+    y -= 12;
 }
 
 LeftDown, RightDown: bool
@@ -164,6 +247,7 @@ on_cursor :: proc "cdecl" (window: glfw.WindowHandle, currX, currY: f64) {
     }
 }
 on_key :: proc "cdecl" (window: glfw.WindowHandle, key, scancode, action, mods: i32) {
+    context = runtime.default_context()
     if action != glfw.PRESS { return } // Check for a key press.
 
     switch key {
@@ -182,7 +266,15 @@ on_key :: proc "cdecl" (window: glfw.WindowHandle, key, scancode, action, mods: 
         break;
 
         case glfw.KEY_D:
-            env.cloth.drop = true
+            set_fixed(&env.cloth, .FIX_NONE)
+        break;
+
+        case glfw.KEY_1:
+            set_fixed(&env.cloth, .FIX_TOP)
+        break;
+
+        case glfw.KEY_2:
+            set_fixed(&env.cloth, .FIX_TOP_CORNERS)
         break;
     }
 }

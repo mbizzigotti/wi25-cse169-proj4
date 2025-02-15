@@ -24,16 +24,23 @@ load_vertex_buffer :: proc(vertices: [] $V) -> Vertex_Buffer {
     offsets := reflect.struct_field_offsets(V)
     stride  := cast(i32) size_of(V)
 
+    //fmt.println("BEGIN VERTEX_BUFFER");
     for i in 0..<len(types) {
         type, offset := types[i], offsets[i]
-        info  := type.variant.(runtime.Type_Info_Array)
-        index := cast(u32) i
-        size  := cast(i32) info.count
+        info    := type.variant.(runtime.Type_Info_Array)
+        index   := cast(u32) i
+        size    := cast(i32) info.count
+        gl_type : u32 = gl.FLOAT;
+        normalize := gl.FALSE;
+        
+        if info.elem.id == u8 { gl_type = gl.UNSIGNED_BYTE; normalize = gl.TRUE; }
 
-        // if info.elem.id == i32 { } // type is hard-coded to be FLOAT always for not
-        gl.VertexAttribPointer(index, size, gl.FLOAT, gl.FALSE, stride, offset)
+        //fmt.printf("%s <- %T (%i)\n", reflect.struct_field_names(V)[i], type, stride);
+        
+        gl.VertexAttribPointer(index, size, gl_type, normalize, stride, offset)
         gl.EnableVertexAttribArray(index)
     }
+    //fmt.println("END   VERTEX_BUFFER");
     gl.BindBuffer(gl.ARRAY_BUFFER, 0)
 
     return buffer
@@ -53,6 +60,31 @@ load_index_buffer :: proc(indices: [] $I) -> Index_Buffer {
     gl.GenBuffers(1, &id)
     gl.BindBuffer(gl.ELEMENT_ARRAY_BUFFER, id)
     gl.BufferData(gl.ELEMENT_ARRAY_BUFFER, len(indices) * size_of(I), raw_data(indices), gl.STATIC_DRAW)
+    return buffer
+}
+
+load_quads_index_buffer :: proc(count: int) -> Index_Buffer {
+    using buffer : Index_Buffer
+    gl.GenBuffers(1, &id)
+    gl.BindBuffer(gl.ELEMENT_ARRAY_BUFFER, id)
+
+    temp_indices := make([] u32, count * 6, context.temp_allocator);
+    i := 0;
+    for k in 0..<count {
+        temp_indices[i] = cast(u32) (k*4 + 0); i += 1;
+        temp_indices[i] = cast(u32) (k*4 + 1); i += 1;
+        temp_indices[i] = cast(u32) (k*4 + 2); i += 1;
+        temp_indices[i] = cast(u32) (k*4 + 2); i += 1;
+        temp_indices[i] = cast(u32) (k*4 + 0); i += 1;
+        temp_indices[i] = cast(u32) (k*4 + 3); i += 1;
+    }
+
+    //for j in 0..<10 {
+    //    t := &temp_indices
+    //    fmt.println(t[j*6+0], t[j*6+1], t[j*6+2], t[j*6+3], t[j*6+4], t[j*6+5])
+    //}
+
+    gl.BufferData(gl.ELEMENT_ARRAY_BUFFER, i * size_of(u32), raw_data(temp_indices), gl.STATIC_DRAW)
     return buffer
 }
 
