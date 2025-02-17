@@ -1,23 +1,19 @@
 'use strict'
 
-//alert("<3 Julie");
-
 const app = document.getElementById("app");
 const gl  = app.getContext("webgl2");
 
+// Imma blue ba da!
 gl.clearColor(0.0, 0.0, 0.2, 1.0);
 gl.clear(gl.COLOR_BUFFER_BIT);
 
-
 let c_floats = null;
-let c_bytes  = null;
 
 // Convert C float[] to Javascript Float32Array
 function c_float_array(address, size) {
     const base = address >> 2; // want an index (float = 4 bytes)
     return c_floats.slice(base, base + size);
 }
-
 
 const shaders = {};
 const uniforms = {
@@ -67,7 +63,7 @@ const scene = {
     }
 }
 
-const upload_cloth_vertex_buffer = (count, positions, colors, normals) => {
+const upload_cloth_vertices = (count, positions, colors, normals) => {
     count = count * 3;
 
     gl.bindBuffer(gl.ARRAY_BUFFER, scene.cloth.buffers.position);
@@ -80,8 +76,6 @@ const upload_cloth_vertex_buffer = (count, positions, colors, normals) => {
     gl.bufferData(gl.ARRAY_BUFFER, c_float_array(normals, count), gl.DYNAMIC_DRAW);
 }
 
-const print = (x) => console.log(x);
-
 const set_view_projection = (matrix) => {
     uniforms.mat4_ViewProj = c_float_array(matrix, 16);
 }
@@ -92,8 +86,11 @@ const draw_scene = () => {
         gl.useProgram(shader.program);
         for (const uniform_name of object.uniforms) {
             const location = gl.getUniformLocation(shader.program, uniform_name);
+            // TODO: call correct function based on prefix e.g. "mat4_" => Matrix4fv
             gl.uniformMatrix4fv(location, false, uniforms[uniform_name]);
         }
+        // NOTE: At this point it is probably time to let the wasm handle the vertex buffers themselves,
+        //       and not have this garbage here. Or have some kind of mesh abstraction
         if (Object.hasOwn(object, "buffers")) {
             gl.bindBuffer(gl.ARRAY_BUFFER, object.buffers.position);
             gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 0, 0);
@@ -114,20 +111,17 @@ const draw_scene = () => {
     }
 }
 
-WebAssembly.instantiateStreaming(fetch('example.wasm'), {
+WebAssembly.instantiateStreaming(fetch('bin/lib.wasm'), {
     env: {
-        print,
         set_view_projection,
-        sinf: (x) => Math.sin(x),
-        cosf: (x) => Math.cos(x),
-    //    get_aspect: () => (app.clientHeight / app.clientWidth),
-        get_aspect: () => (app.clientWidth / app.clientHeight),
+        sinf: (x) => Math.sin(x), // TODO: this needed?
+        cosf: (x) => Math.cos(x), // TODO: this needed?
+        get_aspect: () => (app.clientWidth / app.clientHeight), // TODO: remove
         draw_scene,
-        upload_cloth_vertex_buffer,
+        upload_cloth_vertices,
     }
 }).then(async (wasm) => {
     const c = wasm.instance.exports;
-    c_bytes  = new Uint8Array(c.memory.buffer);
     c_floats = new Float32Array(c.memory.buffer);
 
     const on_resize = () => {
@@ -135,6 +129,7 @@ WebAssembly.instantiateStreaming(fetch('example.wasm'), {
         app.height = window.innerHeight;
         gl.viewport(0, 0, app.width, app.height);
         console.info("Resized: ", app.width, "x", app.height);
+        // TODO: call on_resize callback from Odin
     }
     window.addEventListener("resize", on_resize);
     on_resize();
@@ -144,9 +139,8 @@ WebAssembly.instantiateStreaming(fetch('example.wasm'), {
         const info = elem_shader.type.split('/');
         const name = info[0];
         const type = info[1];
-        if (shaders[name] == null) {
+        if (shaders[name] == null)
             shaders[name] = {};
-        }
         shaders[name][type] = elem_shader.textContent;
     }
     compile_shaders(shaders);
@@ -161,9 +155,9 @@ WebAssembly.instantiateStreaming(fetch('example.wasm'), {
     document.addEventListener('mouseup', (e) => {
         c.on_mouse_up();
     });
-    //document.addEventListener('mouseleave', (e) => {
-    //    c.on_mouse_leave();
-    //});
+    document.addEventListener('mouseleave', (e) => {
+        c.on_mouse_up(); // HACK, probably want a seperate event?
+    });
     document.addEventListener('mousemove', (e) => {
         c.on_mouse_move(e.clientX, e.clientY);
     });
@@ -172,16 +166,16 @@ WebAssembly.instantiateStreaming(fetch('example.wasm'), {
     });
 
     let prev = null;
-
     function loop(timestamp) {
         if (prev === undefined) prev = timestamp;
         const dt = (timestamp - prev)*0.001;
+        // Wait, if we are not clearing, how does the depth buffer get cleared???
+        // 🪄 🐇
         c.update(dt);
         document.getElementById("FPS").textContent = `FPS: ${(1.0 / dt).toFixed(1)}`;
         prev = timestamp;
         window.requestAnimationFrame(loop);
     }
-
     window.requestAnimationFrame(loop);
 })
 
@@ -193,17 +187,13 @@ function compile_shaders(shaders) {
 }
 
 function create_shader_program(vsSource, fsSource) {
-    const vertexShader   = loadShader(gl.VERTEX_SHADER,   vsSource);
-    const fragmentShader = loadShader(gl.FRAGMENT_SHADER, fsSource);
-  
-    // Create the shader program
+    const vertexShader   = load_shader(gl.VERTEX_SHADER,   vsSource);
+    const fragmentShader = load_shader(gl.FRAGMENT_SHADER, fsSource);
   
     const shaderProgram = gl.createProgram();
     gl.attachShader(shaderProgram, vertexShader);
     gl.attachShader(shaderProgram, fragmentShader);
     gl.linkProgram(shaderProgram);
-  
-    // If creating the shader program failed, alert
   
     if (!gl.getProgramParameter(shaderProgram, gl.LINK_STATUS)) {
         console.error(`Unable to initialize the shader program: ${gl.getProgramInfoLog( shaderProgram, )}`);
@@ -213,7 +203,7 @@ function create_shader_program(vsSource, fsSource) {
     return shaderProgram;
 }
 
-function loadShader(type, source) {
+function load_shader(type, source) {
     const shader = gl.createShader(type);
     gl.shaderSource(shader, `#version 300 es\n${source}`);
     gl.compileShader(shader);

@@ -1,10 +1,2 @@
-
-run: proj4
-	./proj4
-
-proj4: $(wildcard *.odin)
-	odin build . -out:proj4 -o:speed
-
-clean:
-	rm proj4
-
+lib.wasm: main.odin
+	odin build . -target:freestanding_wasm32 -o:speed -out:bin/lib.wasm
